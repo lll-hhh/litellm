@@ -4,62 +4,26 @@ use litellm_python_compat::{
     flags::{self, lower_is_true, str_to_bool},
     json::from_json,
 };
-use litellm_redis_resolve::{Entry, Kwargs, SETTINGS, is_present, setting};
+use strum::IntoEnumIterator;
 
-use super::configured::{ConfiguredRedis, Nulls};
-use crate::Error;
-
-const NAMED_BY_CACHE: &[&str] = &[
-    "host",
-    "port",
-    "password",
-    "socket_timeout",
-    "startup_nodes",
-    "namespace",
-    "gcp_service_account",
-    "gcp_ssl_ca_certs",
-];
-
-/// How `_merge_redis_kwargs` reads a fallback: `get_secret` turns `true` and `false` into a bool, and
-/// `get_secret_str` treats that bool as unset.
-#[derive(Clone, Copy)]
-enum Read {
-    Secret,
-    SecretStr,
-}
-
-const TARGETS: &[(&str, Read)] = &[
-    ("startup_nodes", Read::Secret),
-    ("sentinel_nodes", Read::Secret),
-    ("sentinel_password", Read::SecretStr),
-    ("service_name", Read::Secret),
-];
-
-const IDENTITIES: &[(&str, Read)] = &[
-    ("gcp_service_account", Read::SecretStr),
-    ("gcp_ssl_ca_certs", Read::SecretStr),
-    ("azure_redis_ad_token", Read::Secret),
-];
-
-const AZURE: &[(&str, Read)] = &[
-    ("azure_client_id", Read::SecretStr),
-    ("azure_tenant_id", Read::SecretStr),
-    ("azure_client_secret", Read::SecretStr),
-];
-
-const AWS: &[(&str, Read)] = &[("aws_iam_region", Read::SecretStr)];
+use crate::{
+    Entry, Error, Kwargs,
+    configured::{ConfiguredRedis, Nulls},
+    is_present,
+    keys::{self, Fallback, Kwarg, Read, When},
+};
 
 /// The configured settings over their `REDIS_*` values, `{**environment_kwargs, **env_overrides}`
 /// in `_merge_redis_kwargs`, with the `get_secret` fallbacks it reads filled in. A null left in the result is
 /// an explicit `None` that hid its environment value.
-pub(super) fn merged(configured: &ConfiguredRedis, lookup: &dyn Lookup) -> Result<Kwargs, Error> {
+pub(crate) fn merged(configured: &ConfiguredRedis, lookup: &dyn Lookup) -> Result<Kwargs, Error> {
     let block: Kwargs = configured
         .fields
         .iter()
         .map(|(key, value)| (key, environment_reference(value, lookup)))
         .filter(|(key, value)| !value.is_null() || keeps_null(configured.nulls, key))
         .map(|(key, value)| {
-            let value = serde_json::to_value(&value).map_err(|_| Error::RedisNotPlainData {
+            let value = serde_json::to_value(&value).map_err(|_| Error::NotPlainData {
                 setting: key.clone(),
             })?;
             let entry = Entry {
@@ -69,87 +33,88 @@ pub(super) fn merged(configured: &ConfiguredRedis, lookup: &dyn Lookup) -> Resul
             Ok((key.clone(), entry))
         })
         .collect::<Result<_, Error>>()?;
-    let names_a_target = ["host", "startup_nodes", "sentinel_nodes"]
-        .iter()
-        .any(|key| is_set(&block, key));
-    let drop_environment_url = names_a_target && !is_set(&block, "url");
+    let url = Kwarg::Url.name();
+    let names_a_target = Kwarg::iter()
+        .filter(|kwarg| kwarg.setting().target && *kwarg != Kwarg::Url)
+        .any(|kwarg| is_set(&block, kwarg.name()));
+    let drop_environment_url = names_a_target && !is_set(&block, url);
     let layered: Kwargs = environment(lookup)
-        .filter(|(key, _)| !(key == "url" && drop_environment_url))
+        .filter(|(key, _)| !(key == url && drop_environment_url))
         .chain(block)
         .collect();
     let fallbacks = fallbacks(&layered, configured.credential_provider.is_some(), lookup);
     Ok(layered.into_iter().chain(fallbacks).collect())
 }
 
-// The fallbacks are read under the same conditions as _merge_redis_kwargs, so a secret Python never asks
-// for is never filled in
 fn fallbacks(layered: &Kwargs, has_provider: bool, lookup: &dyn Lookup) -> Kwargs {
-    let fill = |kwargs: &[(&str, Read)]| -> Kwargs {
-        kwargs
-            .iter()
-            .filter_map(|(kwarg, read)| fallback(layered, kwarg, *read, lookup))
+    let fill = |when: When| -> Kwargs {
+        Kwarg::iter()
+            .filter_map(|kwarg| {
+                let fallback = kwarg.setting().fallback?;
+                (fallback.when == when).then_some((kwarg, fallback))
+            })
+            .filter_map(|(kwarg, fallback)| filled(layered, kwarg, fallback, lookup))
             .collect()
     };
-    let targets = fill(TARGETS);
-    if has_provider || is_set(layered, "credential_provider") {
-        return targets;
+    let always = fill(When::Always);
+    if has_provider || is_set(layered, Kwarg::CredentialProvider.name()) {
+        return always;
     }
-    let identities = fill(IDENTITIES);
-    let value = |kwarg: &str| {
+    let without_provider = fill(When::WithoutProvider);
+    let value = |kwarg: Kwarg| {
         layered
-            .get(kwarg)
+            .get(kwarg.name())
             .filter(|entry| is_present(&entry.value))
-            .or_else(|| identities.get(kwarg))
+            .or_else(|| without_provider.get(kwarg.name()))
             .map(|entry| &entry.value)
     };
-    let gcp = value("gcp_service_account").is_some();
-    let azure = value("azure_redis_ad_token")
+    let gcp = value(Kwarg::GcpServiceAccount).is_some();
+    let azure = value(Kwarg::AzureRedisAdToken)
         .is_some_and(|token| text(token).is_some_and(|token| lower_is_true(&token)));
     let aws = layered
-        .get("aws_iam_auth")
+        .get(Kwarg::AwsIamAuth.name())
         .is_some_and(|entry| flags::coerces_to_true(&from_json(entry.value.clone())));
     let azure_settings = match azure && !gcp {
-        true => fill(AZURE),
+        true => fill(When::AzureAd),
         false => Kwargs::new(),
     };
     let aws_settings = match aws && !gcp && !azure {
-        true => fill(AWS),
+        true => fill(When::AwsIam),
         false => Kwargs::new(),
     };
-    targets
+    always
         .into_iter()
-        .chain(identities)
+        .chain(without_provider)
         .chain(azure_settings)
         .chain(aws_settings)
         .collect()
 }
 
-fn fallback(
+fn filled(
     layered: &Kwargs,
-    kwarg: &str,
-    read: Read,
+    kwarg: Kwarg,
+    fallback: Fallback,
     lookup: &dyn Lookup,
 ) -> Option<(String, Entry)> {
     if layered
-        .get(kwarg)
+        .get(kwarg.name())
         .is_some_and(|entry| is_present(&entry.value))
     {
         return None;
     }
-    let names = setting(kwarg).map_or(&[][..], |setting| setting.fallback);
-    names.iter().find_map(|name| {
+    fallback.names.iter().find_map(|name| {
         let value = lookup
             .get(name)
             .filter(|value| !value.is_empty())
             .map(secret)?;
-        match (read, &value) {
+        match (fallback.read, &value) {
             (Read::SecretStr, serde_json::Value::Bool(_)) => None,
             _ => {
                 let entry = Entry {
                     value,
                     source: (*name).to_owned(),
                 };
-                Some((kwarg.to_owned(), entry))
+                Some((kwarg.name().to_owned(), entry))
             }
         }
     })
@@ -171,22 +136,32 @@ fn text(value: &serde_json::Value) -> Option<String> {
 fn keeps_null(nulls: Nulls, key: &str) -> bool {
     match nulls {
         Nulls::Dropped => false,
-        Nulls::KeptUnlessNamedByCache => !NAMED_BY_CACHE.contains(&key),
+        Nulls::KeptUnlessNamedByCache => {
+            !keys::setting(key).is_some_and(|setting| setting.named_by_cache)
+        }
         #[cfg(test)]
         Nulls::Kept => true,
     }
 }
 
 fn environment(lookup: &dyn Lookup) -> impl Iterator<Item = (String, Entry)> + '_ {
-    SETTINGS.iter().filter_map(|setting| {
-        let source = setting.environment_name()?;
+    Kwarg::iter().filter_map(|kwarg| {
+        let source = kwarg.environment_name()?;
         let value = lookup.get(&source)?;
         let entry = Entry {
             value: secret(value),
             source,
         };
-        Some((setting.kwarg.to_owned(), entry))
+        Some((kwarg.name().to_owned(), entry))
     })
+}
+
+/// Whether the environment alone names where Redis is, under any name the merge reads a target from.
+pub fn environment_names_a_target(lookup: &dyn Lookup) -> bool {
+    Kwarg::iter()
+        .filter(|kwarg| kwarg.setting().target)
+        .flat_map(Kwarg::source_names)
+        .any(|name| lookup.get(&name).is_some())
 }
 
 // load_config resolves os.environ/ to None when unset, so a missing reference is a null like any other

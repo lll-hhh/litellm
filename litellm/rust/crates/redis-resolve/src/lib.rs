@@ -4,15 +4,23 @@ use litellm_redis_types::{Auth, HealthCheck, ProviderHandle, Resolution, StaticA
 use serde_json::Value;
 
 mod auth;
+mod configured;
 mod endpoint;
 mod error;
 mod keys;
+mod layers;
 mod options;
+mod secrets;
+#[cfg(test)]
+mod surface_tests;
 mod tls;
 
+pub use configured::ConfiguredRedis;
 pub use error::{Error, Expected, PythonException};
-pub use keys::{Asked, FromUrl, Handling, SETTINGS, Setting, setting};
+pub use keys::{Asked, Fallback, FromUrl, Handling, Kwarg, Read, Setting, When};
+pub use layers::environment_names_a_target;
 pub use options::is_present;
+pub use secrets::SecretSnapshot;
 
 use options::Options;
 

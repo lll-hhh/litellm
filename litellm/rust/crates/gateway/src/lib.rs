@@ -1,7 +1,11 @@
+mod db;
 mod error;
+mod health;
 mod redis;
+mod state;
 pub use error::Error;
 pub use redis::RedisClients;
+pub use state::AppState;
 
 use std::{path::Path, sync::Arc, time::Instant};
 
@@ -92,7 +96,7 @@ pub fn install_crypto_provider() {
     }
 }
 
-pub async fn build_redis(
+pub(crate) async fn build_redis(
     config: &Config,
     pool: &HttpClientPool,
     http: &litellm_http::HttpClientConfig,
@@ -111,19 +115,15 @@ pub async fn build_redis(
     redis::connect(config, &*lookup, &resources).await
 }
 
-pub fn router(inference: Arc<Gateway>, config: &Config) -> Router {
+pub fn router(state: AppState, config: &Config) -> Router {
     let auth = Auth::from_config(config);
-    litellm_gateway_inference::router(inference)
+    litellm_gateway_inference::router(state.inference.clone())
         .route_layer(axum::middleware::from_fn_with_state(
             auth,
             litellm_gateway_auth::authenticate,
         ))
         .layer(axum::middleware::from_fn(log_request))
-        .route("/health/readiness", axum::routing::get(readiness))
-}
-
-async fn readiness() -> axum::Json<serde_json::Value> {
-    axum::Json(serde_json::json!({"status": "healthy", "db": "Not connected"}))
+        .merge(health::router(state))
 }
 
 async fn log_request(request: Request, next: Next) -> Response {

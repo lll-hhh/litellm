@@ -3902,6 +3902,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "litellm-db-resolve"
+version = "0.1.0"
+dependencies = [
+ "envy",
+ "litellm-config",
+ "litellm-db",
+ "litellm-python-compat",
+ "litellm-secret-value",
+ "percent-encoding",
+ "rstest",
+ "serde",
+ "serde_json",
+ "shlex",
+ "strum",
+ "thiserror 2.0.21",
+ "tokio",
+ "url",
+]
+
+[[package]]
 name = "litellm-db-testing"
 version = "0.1.0"
 dependencies = [
@@ -3962,6 +3982,8 @@ dependencies = [
  "litellm-circuit-breaker",
  "litellm-config",
  "litellm-config-load",
+ "litellm-db",
+ "litellm-db-resolve",
  "litellm-env",
  "litellm-error",
  "litellm-gateway-auth",
@@ -3990,7 +4012,6 @@ dependencies = [
  "tower",
  "tracing",
  "uuid",
- "veil",
  "wiremock",
 ]
 
@@ -4518,6 +4539,7 @@ dependencies = [
  "litellm-core-utils",
  "litellm-coroutine",
  "litellm-db",
+ "litellm-db-resolve",
  "litellm-env",
  "litellm-error",
  "litellm-gateway-auth-core",
@@ -4644,6 +4666,8 @@ dependencies = [
 name = "litellm-redis-resolve"
 version = "0.1.0"
 dependencies = [
+ "litellm-config",
+ "litellm-env",
  "litellm-python-compat",
  "litellm-redis-types",
  "litellm-secret-value",
@@ -4654,6 +4678,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tracing",
  "url",
+ "veil",
 ]
 
 [[package]]
